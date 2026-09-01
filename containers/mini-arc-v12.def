@@ -1,0 +1,22 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
+
+%post
+    mkdir -p /workspace /scratch /checkpoints
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export PYTHONDONTWRITEBYTECODE=1
+    export OMP_NUM_THREADS=1
+
+%test
+    python -c "import sqlite3, torch; assert torch.__version__.startswith('2.4.1')"
+
+%runscript
+    exec python "$@"
+
+%labels
+    Author mini-arc-v12
+    PyTorch 2.4.1
+    CUDA 12.1
+    Purpose "Balanced RE-ARC training on Grid5000 A100 GPUs"

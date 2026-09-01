@@ -56,6 +56,10 @@ Thumbs.db
 
 # Model checkpoints (uncomment if you don't want to track checkpoints)
 # checkpoints/
+*.sif
+
+# Locally prepared RE-ARC artifact (regenerate with rearc_manifest.py)
+data/re_arc_5k_12x12_balanced/
 
 # Temporary files
 *.swp

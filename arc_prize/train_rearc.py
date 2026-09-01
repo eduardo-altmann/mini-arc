@@ -132,6 +132,25 @@ def atomic_torch_save(value: Any, path: str | Path) -> None:
             os.unlink(temporary_name)
 
 
+def atomic_file_copy(source: str | Path, destination: str | Path) -> None:
+    """Copy a completed local checkpoint to persistent storage atomically."""
+    source = Path(source)
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=destination.parent
+    )
+    os.close(file_descriptor)
+    try:
+        shutil.copyfile(source, temporary_name)
+        with open(temporary_name, "rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, destination)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
 def _archive_existing_checkpoints(checkpoint_dir: Path) -> None:
     existing = [checkpoint_dir / "latest.pt", checkpoint_dir / "best.pt"]
     existing = [path for path in existing if path.exists()]
@@ -326,11 +345,19 @@ def train(
     checkpoint_dir: str | Path,
     config: MiniARCV12Config,
     *,
+    persistent_checkpoint_dir: str | Path | None = None,
     force_restart: bool = False,
 ) -> None:
     rank, local_rank, world_size, device = _distributed_context()
     dataset_dir = Path(dataset_dir).expanduser().resolve()
     checkpoint_dir = Path(checkpoint_dir).expanduser().resolve()
+    persistent_dir = (
+        Path(persistent_checkpoint_dir).expanduser().resolve()
+        if persistent_checkpoint_dir is not None
+        else None
+    )
+    if persistent_dir == checkpoint_dir:
+        persistent_dir = None
     latest_path = checkpoint_dir / "latest.pt"
     best_path = checkpoint_dir / "best.pt"
 
@@ -341,6 +368,15 @@ def train(
 
     if force_restart and rank == 0:
         _archive_existing_checkpoints(checkpoint_dir)
+        if persistent_dir is not None:
+            _archive_existing_checkpoints(persistent_dir)
+    elif rank == 0 and persistent_dir is not None:
+        persistent_latest = persistent_dir / "latest.pt"
+        persistent_best = persistent_dir / "best.pt"
+        if not latest_path.exists() and persistent_latest.exists():
+            atomic_file_copy(persistent_latest, latest_path)
+        if not best_path.exists() and persistent_best.exists():
+            atomic_file_copy(persistent_best, best_path)
     _barrier(world_size)
 
     (
@@ -447,8 +483,12 @@ def train(
                 partial_train_metrics_by_rank=partial_metrics_by_rank,
             )
             atomic_torch_save(state, latest_path)
+            if persistent_dir is not None:
+                atomic_file_copy(latest_path, persistent_dir / "latest.pt")
             if is_best:
                 atomic_torch_save(state, best_path)
+                if persistent_dir is not None:
+                    atomic_file_copy(best_path, persistent_dir / "best.pt")
             print(
                 f"Saved latest checkpoint at epoch={next_epoch}, step={next_step}"
                 + (" and updated best checkpoint" if is_best else ""),
@@ -642,6 +682,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--checkpoint-dir",
         default=str(Path.home() / "arc-checkpoints" / MODEL_NAME),
     )
+    parser.add_argument(
+        "--persistent-checkpoint-dir",
+        help="optional mirror for each completed local latest/best checkpoint",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -676,6 +720,7 @@ def main(argv: list[str] | None = None) -> int:
         args.dataset_dir,
         args.checkpoint_dir,
         config,
+        persistent_checkpoint_dir=args.persistent_checkpoint_dir,
         force_restart=args.force_restart,
     )
     return 0

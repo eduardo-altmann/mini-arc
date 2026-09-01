@@ -1,4 +1,5 @@
 import json
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -24,11 +25,16 @@ class PrepareReARCDatasetTest(unittest.TestCase):
 
             first = prepare_rearc_dataset(root / "source", root / "prepared-a", seed=7)
             second = prepare_rearc_dataset(root / "source", root / "prepared-b", seed=7)
+            shutil.copytree(root / "source", root / "relocated-source")
+            relocated = prepare_rearc_dataset(
+                root / "relocated-source", root / "prepared-c", seed=7
+            )
 
             self.assertEqual(first.manifest["num_families"], 1)
             self.assertEqual(first.manifest["num_excluded_families"], 1)
             self.assertEqual(first.manifest["num_examples"], 10)
             self.assertEqual(first.manifest["fingerprint"], second.manifest["fingerprint"])
+            self.assertEqual(first.manifest["fingerprint"], relocated.manifest["fingerprint"])
             family = first.manifest["families"][0]
             self.assertEqual(len(family["validation_indices"]), 1)
             self.assertEqual(len(family["train_indices"]), 9)
