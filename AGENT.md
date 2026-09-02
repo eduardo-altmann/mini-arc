@@ -52,6 +52,16 @@ the training split. `BalancedReARCDataset` must retain this property.
 - Reported metrics: training loss/cell accuracy and validation loss/cell/exact
   grid accuracy.
 
+Architecture profiles are checkpoint-incompatible by design:
+
+- `reduced` / `mini-arc-v12`: 4 layers, 4 heads, `d_model=128`, `d_ff=512`.
+- `full` / `mini-arc-v12-full`: 16 layers, 16 heads, `d_model=512`, `d_ff=3072`.
+
+Select a profile with `--model-profile`; use the full wrapper
+`scripts/train_mini_arc_v12_full_oar.sh` for Grid'5000. It defaults to
+`$HOME/arc-checkpoints/mini-arc-v12-full`, and must never be pointed at the
+reduced baseline checkpoint directory.
+
 Do not replace the full checkpoint with model weights alone. A resumable
 checkpoint includes model, optimizer, AMP scaler, schedulers, epoch/step,
 history, best metric, dataset fingerprint, and per-rank RNG state.

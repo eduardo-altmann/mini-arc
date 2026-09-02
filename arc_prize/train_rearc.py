@@ -27,8 +27,8 @@ from arc_prize.model import ARCTransformerEncoderDecoderParams, ARCVisionEncoder
 from arc_prize.rearc_dataset import BalancedReARCDataset, collate_balanced_rearc
 
 
-MODEL_NAME = "mini-arc-v12"
 MODEL_TYPE = "vision_encoder"
+DEFAULT_MODEL_PROFILE = "reduced"
 
 
 @dataclass(frozen=True)
@@ -62,18 +62,52 @@ class MiniARCV12Config:
             raise ValueError("weight decay, workers, and checkpoint interval cannot be negative")
 
 
-def model_params() -> ARCTransformerEncoderDecoderParams:
-    return ARCTransformerEncoderDecoderParams(
-        grid_dim=12,
-        num_train_pairs=4,
-        num_colors=10,
-        num_encoder_layers=4,
-        num_decoder_layers=0,
-        num_heads=4,
-        d_model=128,
-        d_ff=512,
-        dropout=0.1,
-    )
+@dataclass(frozen=True)
+class MiniARCModelSpec:
+    """An architecture profile with an independent checkpoint identity."""
+
+    name: str
+    params: ARCTransformerEncoderDecoderParams
+
+
+MODEL_SPECS = {
+    "reduced": MiniARCModelSpec(
+        name="mini-arc-v12",
+        params=ARCTransformerEncoderDecoderParams(
+            grid_dim=12,
+            num_train_pairs=4,
+            num_colors=10,
+            num_encoder_layers=4,
+            num_decoder_layers=0,
+            num_heads=4,
+            d_model=128,
+            d_ff=512,
+            dropout=0.1,
+        ),
+    ),
+    "full": MiniARCModelSpec(
+        name="mini-arc-v12-full",
+        params=ARCTransformerEncoderDecoderParams(
+            grid_dim=12,
+            num_train_pairs=4,
+            num_colors=10,
+            num_encoder_layers=16,
+            num_decoder_layers=0,
+            num_heads=16,
+            d_model=512,
+            d_ff=3072,
+            dropout=0.1,
+        ),
+    ),
+}
+
+
+def model_spec(profile: str = DEFAULT_MODEL_PROFILE) -> MiniARCModelSpec:
+    try:
+        return MODEL_SPECS[profile]
+    except KeyError as error:
+        choices = ", ".join(sorted(MODEL_SPECS))
+        raise ValueError(f"unknown model profile {profile!r}; choose one of: {choices}") from error
 
 
 def _distributed_context() -> tuple[int, int, int, torch.device]:
@@ -199,12 +233,13 @@ def _checkpoint_state(
     history: list[dict[str, Any]],
     rng_states: list[dict[str, Any]],
     partial_train_metrics_by_rank: list[dict[str, float]],
+    model_specification: MiniARCModelSpec,
 ) -> dict[str, Any]:
     return {
         "checkpoint_version": 1,
-        "model_name": MODEL_NAME,
+        "model_name": model_specification.name,
         "model_type": MODEL_TYPE,
-        "model_params": asdict(model_params()),
+        "model_params": asdict(model_specification.params),
         "train_config": asdict(config),
         "dataset_fingerprint": dataset_fingerprint,
         "model_state_dict": _base_model(model).state_dict(),
@@ -235,12 +270,17 @@ def _load_checkpoint(
     config: MiniARCV12Config,
     rank: int,
     device: torch.device,
+    model_specification: MiniARCModelSpec,
 ) -> dict[str, Any]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    if checkpoint.get("model_name") != MODEL_NAME:
-        raise ValueError(f"checkpoint is for {checkpoint.get('model_name')}, not {MODEL_NAME}")
-    if checkpoint.get("model_params") != asdict(model_params()):
-        raise ValueError("checkpoint model parameters do not match mini-arc-v12")
+    if checkpoint.get("model_name") != model_specification.name:
+        raise ValueError(
+            f"checkpoint is for {checkpoint.get('model_name')}, not {model_specification.name}"
+        )
+    if checkpoint.get("model_params") != asdict(model_specification.params):
+        raise ValueError(
+            f"checkpoint model parameters do not match {model_specification.name}"
+        )
     if checkpoint.get("dataset_fingerprint") != dataset_fingerprint:
         raise ValueError("checkpoint dataset fingerprint does not match the prepared dataset")
     saved_config = checkpoint.get("train_config", {})
@@ -347,6 +387,7 @@ def train(
     *,
     persistent_checkpoint_dir: str | Path | None = None,
     force_restart: bool = False,
+    model_profile: str = DEFAULT_MODEL_PROFILE,
 ) -> None:
     rank, local_rank, world_size, device = _distributed_context()
     dataset_dir = Path(dataset_dir).expanduser().resolve()
@@ -358,6 +399,7 @@ def train(
     )
     if persistent_dir == checkpoint_dir:
         persistent_dir = None
+    model_specification = model_spec(model_profile)
     latest_path = checkpoint_dir / "latest.pt"
     best_path = checkpoint_dir / "best.pt"
 
@@ -388,7 +430,7 @@ def train(
         validation_loader,
     ) = _make_loaders(dataset_dir, config, world_size, rank)
 
-    model: nn.Module = ARCVisionEncoder(model_params()).to(device)
+    model: nn.Module = ARCVisionEncoder(model_specification.params).to(device)
     if world_size > 1:
         # The first baseline deliberately does not pass a target grid for
         # refinement, so ARCVisionEncoder.tgt_embedding is inactive.
@@ -437,6 +479,7 @@ def train(
             config=config,
             rank=rank,
             device=device,
+            model_specification=model_specification,
         )
         epoch = int(checkpoint["epoch"])
         resume_step = int(checkpoint["step_in_epoch"])
@@ -455,7 +498,7 @@ def train(
                 flush=True,
             )
     elif rank == 0:
-        print(f"Starting new {MODEL_NAME} training run", flush=True)
+        print(f"Starting new {model_specification.name} training run", flush=True)
 
     stop_requested = False
 
@@ -488,6 +531,7 @@ def train(
                 history=history,
                 rng_states=rng_states,
                 partial_train_metrics_by_rank=partial_metrics_by_rank,
+                model_specification=model_specification,
             )
             atomic_torch_save(state, latest_path)
             if persistent_dir is not None:
@@ -510,6 +554,9 @@ def train(
                     "device": str(device),
                     "world_size": world_size,
                     "families": len(train_dataset.families),
+                    "model_name": model_specification.name,
+                    "model_params": asdict(model_specification.params),
+                    "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
                     "train_items": len(train_dataset),
                     "validation_items": len(validation_dataset),
                     "config": asdict(config),
@@ -687,7 +734,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument(
         "--checkpoint-dir",
-        default=str(Path.home() / "arc-checkpoints" / MODEL_NAME),
+        default=str(Path.home() / "arc-checkpoints" / model_spec().name),
     )
     parser.add_argument(
         "--persistent-checkpoint-dir",
@@ -705,6 +752,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--checkpoint-every-steps", type=int, default=0)
     parser.add_argument("--force-restart", action="store_true")
+    parser.add_argument(
+        "--model-profile",
+        choices=sorted(MODEL_SPECS),
+        default=DEFAULT_MODEL_PROFILE,
+        help="architecture/checkpoint identity; full is the original 16-layer 512-dim model",
+    )
     return parser.parse_args(argv)
 
 
@@ -729,6 +782,7 @@ def main(argv: list[str] | None = None) -> int:
         config,
         persistent_checkpoint_dir=args.persistent_checkpoint_dir,
         force_restart=args.force_restart,
+        model_profile=args.model_profile,
     )
     return 0
 

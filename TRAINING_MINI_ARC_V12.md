@@ -144,3 +144,28 @@ directory. If a full epoch is comfortably shorter than the allocation, leave
    reports the next epoch/global step.
 4. Benchmark one full 1,000-step epoch and check GPU memory and duration.
 5. Continue normal allocations; every new job resumes `latest.pt` automatically.
+
+## 5. Original mini-arc-v12 architecture
+
+The reduced profile is a fast infrastructure baseline. The original architecture
+is available separately through `scripts/train_mini_arc_v12_full_oar.sh`:
+
+- 16 encoder layers, 16 heads, `d_model=512`, and `d_ff=3072`;
+- 12×12 grids, four demonstration pairs, 2×2 patches, sequence length 468;
+- persistent checkpoints in `$HOME/arc-checkpoints/mini-arc-v12-full`.
+
+It deliberately cannot resume a reduced checkpoint. First run a short full-model
+smoke test to establish memory use:
+
+```bash
+cd "$HOME/arc-agi/mini-arc"
+CHECKPOINT_DIR="$HOME/arc-checkpoints/mini-arc-v12-full-smoke" \
+BATCH_SIZE=2 TRAIN_STEPS=2 VALIDATION_STEPS=1 MAX_EPOCHS=1 \
+FORCE_RESTART=1 ./scripts/train_mini_arc_v12_full_oar.sh
+```
+
+The startup JSON prints `model_name`, the model architecture, and
+`parameter_count`. It should report `mini-arc-v12-full` and approximately
+67.3 million parameters. Then benchmark one full epoch from a fresh full-model
+checkpoint directory, increasing `BATCH_SIZE` only after confirming the A100
+memory headroom.

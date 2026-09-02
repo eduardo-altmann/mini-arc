@@ -20,6 +20,11 @@ and restart-safe training on Grid'5000.
 - 2×2 patch embeddings;
 - four encoder layers, four attention heads, `d_model=128`, and `d_ff=512`.
 
+The default `reduced` profile is the validated baseline. The separate `full`
+profile reproduces the creator's architecture: 16 layers, 16 heads,
+`d_model=512`, and `d_ff=3072`. It uses independent checkpoints and is launched
+with `scripts/train_mini_arc_v12_full_oar.sh`.
+
 Training uses the reduced RE-ARC dataset. Examples are sampled uniformly by
 generator family, so large families do not dominate the objective. Validation
 targets are held out per family and never appear as demonstrations.
@@ -35,6 +40,8 @@ targets are held out per family and never appear as demonstrations.
 - `containers/mini-arc-v12.def` defines the PyTorch/Apptainer image.
 - `scripts/train_mini_arc_v12_oar.sh` stages a Grid'5000 job into `/tmp` and
   mirrors checkpoints back to `$HOME`.
+- `scripts/train_mini_arc_v12_full_oar.sh` selects the original full profile
+  and `$HOME/arc-checkpoints/mini-arc-v12-full`.
 
 ## Quick workflow
 
