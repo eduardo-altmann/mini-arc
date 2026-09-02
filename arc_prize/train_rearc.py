@@ -390,7 +390,14 @@ def train(
 
     model: nn.Module = ARCVisionEncoder(model_params()).to(device)
     if world_size > 1:
-        model = DistributedDataParallel(model, device_ids=[local_rank] if device.type == "cuda" else None)
+        # The first baseline deliberately does not pass a target grid for
+        # refinement, so ARCVisionEncoder.tgt_embedding is inactive.
+        # DDP must explicitly support that intentionally unused parameter.
+        model = DistributedDataParallel(
+            model,
+            device_ids=[local_rank] if device.type == "cuda" else None,
+            find_unused_parameters=True,
+        )
 
     class_weights = torch.ones(11, device=device)
     class_weights[0] = 0.2
