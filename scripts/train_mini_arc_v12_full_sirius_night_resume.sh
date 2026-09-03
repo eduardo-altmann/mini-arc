@@ -5,7 +5,6 @@
 #OAR -t night
 #OAR -p host='sirius-1.lyon.grid5000.fr'
 #OAR -l host=1/gpu=8
-#OAR -r "2026-09-03 19:05:00,2026-09-04 08:55:00"
 #OAR -O mini-arc-v12-full-resume-%jobid%.out
 #OAR -E mini-arc-v12-full-resume-%jobid%.err
 
