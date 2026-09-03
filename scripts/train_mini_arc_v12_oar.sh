@@ -129,6 +129,7 @@ TRAIN_ARGS=(
     --seed "${SEED:-42}"
     --num-workers "${NUM_WORKERS:-0}"
     --checkpoint-every-steps "${CHECKPOINT_EVERY_STEPS:-0}"
+    --refinement-ratio "${REFINEMENT_RATIO:-0}"
     --model-profile "${MODEL_PROFILE:-reduced}"
 )
 if [[ "${FORCE_RESTART:-0}" == "1" ]]; then

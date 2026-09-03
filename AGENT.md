@@ -56,6 +56,8 @@ Architecture profiles are checkpoint-incompatible by design:
 
 - `reduced` / `mini-arc-v12`: 4 layers, 4 heads, `d_model=128`, `d_ff=512`.
 - `full` / `mini-arc-v12-full`: 16 layers, 16 heads, `d_model=512`, `d_ff=3072`.
+- `full-refinement` / `mini-arc-v12-full-refinement`: the same full
+  architecture, independently trained with noisy targets on 25% of steps.
 
 Select a profile with `--model-profile`; use the full wrapper
 `scripts/train_mini_arc_v12_full_oar.sh` for Grid'5000. It defaults to
@@ -64,14 +66,11 @@ reduced baseline checkpoint directory.
 
 ### Current full-model run
 
-The full profile was trained on 8 A100s through epoch 42. Its latest observed
-held-out RE-ARC metrics were 94.49% validation cell accuracy and 26.63% exact
-grid accuracy. `latest.pt` is the resumable state; `best.pt` remains the state
-with the lowest validation loss and is the checkpoint to evaluate first.
-
-The epoch-42 stop was early stopping, not a training failure. The
-`train_mini_arc_v12_full_sirius_night_resume.sh` wrapper raises patience to 100
-and resumes the same run through epoch 100 without `--force-restart`.
+The direct-only full profile completed 100,000 steps on 8 A100s. Its first ARC
+evaluation covered 87 dimension-compatible tasks and scored zero exact grids;
+two-epoch TTT increased padded cell accuracy from 82.83% to 88.68%. That run was
+not paper-comparable because it excluded tasks with more than four context
+pairs and used a shortened TTT procedure.
 
 ### ARC-AGI evaluation and TTT
 
@@ -80,12 +79,21 @@ older Modal evaluator expects a different checkpoint schema and must not be
 used directly. It performs direct inference and optional test-time training
 (TTT): for each ARC task it copies the base model, adapts the copy using that
 task's demonstrations, predicts its query, and discards the copy. TTT does not
-change the base checkpoint or model architecture.
+change the base checkpoint or model architecture. The paper-aligned defaults
+are 15 epochs, a 99.5% cutoff, and all permutations of combinations with at
+least three pairs. `data/mini_arc_v12_evaluation_ids.txt` supplies the paper's
+114 IDs; the OAR launcher truncates context to the first four pairs and scores
+the first query, matching the checked-in original experiment artifacts.
 
-The current baseline never passes a noisy target through `tgt_embedding` during
+Metrics intentionally retain compatibility aliases. `score` is the count of
+fully solved puzzles, `accuracy`/`cell_accuracy` includes all padded 12×12
+cells, and `closeness` counts puzzles with at least 95% cell accuracy.
+
+The direct-only baseline never passes a noisy target through `tgt_embedding` during
 pre-training. Consequently its target-refinement branch is untrained; do not
-run a second `tgt=` refinement pass on this checkpoint. A faithful refinement
-variant requires a new training profile and new checkpoints.
+run a second `tgt=` refinement pass on this checkpoint. The evaluator rejects
+that misuse. Train `scripts/train_mini_arc_v12_full_refinement_oar.sh` for the
+separate refinement checkpoint, then evaluate it with `REFINEMENT_ROUNDS=2`.
 
 Do not replace the full checkpoint with model weights alone. A resumable
 checkpoint includes model, optimizer, AMP scaler, schedulers, epoch/step,

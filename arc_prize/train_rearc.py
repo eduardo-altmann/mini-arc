@@ -44,6 +44,7 @@ class MiniARCV12Config:
     seed: int = 42
     num_workers: int = 0
     checkpoint_every_steps: int = 0
+    refinement_ratio: float = 0.0
 
     def __post_init__(self) -> None:
         positive_fields = {
@@ -60,6 +61,8 @@ class MiniARCV12Config:
             raise ValueError(f"training values must be positive: {invalid}")
         if self.weight_decay < 0 or self.num_workers < 0 or self.checkpoint_every_steps < 0:
             raise ValueError("weight decay, workers, and checkpoint interval cannot be negative")
+        if not 0.0 <= self.refinement_ratio <= 1.0:
+            raise ValueError("refinement ratio must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,20 @@ MODEL_SPECS = {
     ),
     "full": MiniARCModelSpec(
         name="mini-arc-v12-full",
+        params=ARCTransformerEncoderDecoderParams(
+            grid_dim=12,
+            num_train_pairs=4,
+            num_colors=10,
+            num_encoder_layers=16,
+            num_decoder_layers=0,
+            num_heads=16,
+            d_model=512,
+            d_ff=3072,
+            dropout=0.1,
+        ),
+    ),
+    "full-refinement": MiniARCModelSpec(
+        name="mini-arc-v12-full-refinement",
         params=ARCTransformerEncoderDecoderParams(
             grid_dim=12,
             num_train_pairs=4,
@@ -292,9 +309,10 @@ def _load_checkpoint(
         "num_workers",
     }
     mismatches = {
-        key: (saved_config.get(key), value)
+        key: (saved_config.get(key, 0.0 if key == "refinement_ratio" else None), value)
         for key, value in current_config.items()
-        if key not in mutable_resume_fields and saved_config.get(key) != value
+        if key not in mutable_resume_fields
+        and saved_config.get(key, 0.0 if key == "refinement_ratio" else None) != value
     }
     if mismatches:
         raise ValueError(f"checkpoint training configuration mismatch: {mismatches}")
@@ -380,6 +398,15 @@ def _reduce_metrics(values: list[float], device: torch.device, world_size: int) 
     return tensor.tolist()
 
 
+def _refinement_target(target: torch.Tensor, retention_ratio: float, num_classes: int) -> torch.Tensor:
+    """Create the partial target used by the original mini-arc refinement path."""
+    retained = torch.rand(target.shape, device=target.device) < retention_ratio
+    random_values = torch.randint(
+        0, num_classes, target.shape, device=target.device, dtype=target.dtype
+    )
+    return torch.where(retained, target, random_values)
+
+
 def train(
     dataset_dir: str | Path,
     checkpoint_dir: str | Path,
@@ -432,9 +459,8 @@ def train(
 
     model: nn.Module = ARCVisionEncoder(model_specification.params).to(device)
     if world_size > 1:
-        # The first baseline deliberately does not pass a target grid for
-        # refinement, so ARCVisionEncoder.tgt_embedding is inactive.
-        # DDP must explicitly support that intentionally unused parameter.
+        # Direct steps leave tgt_embedding unused; refinement steps leave the
+        # learned output_query unused. DDP must support either graph.
         model = DistributedDataParallel(
             model,
             device_ids=[local_rank] if device.type == "cuda" else None,
@@ -586,10 +612,17 @@ def train(
                 grids = batch["grids"].to(device, non_blocking=True)
                 masks = batch["masks"].to(device, non_blocking=True)
                 targets = batch["output"].to(device, non_blocking=True).long()
+                refinement_target = None
+                if config.refinement_ratio > 0.0 and random.random() < config.refinement_ratio:
+                    refinement_target = _refinement_target(
+                        targets,
+                        retention_ratio=random.uniform(0.0, 0.6),
+                        num_classes=11,
+                    )
 
                 optimizer.zero_grad(set_to_none=True)
                 with autocast(device_type=device.type, enabled=device.type == "cuda"):
-                    logits = model(grids, masks)[0]
+                    logits = model(grids, masks, tgt=refinement_target)[0]
                     loss = criterion(logits.reshape(-1, 11), targets.reshape(-1))
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -751,6 +784,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--checkpoint-every-steps", type=int, default=0)
+    parser.add_argument(
+        "--refinement-ratio",
+        type=float,
+        default=0.0,
+        help="fraction of training steps supplied a noisy partial target (paper uses 0.25)",
+    )
     parser.add_argument("--force-restart", action="store_true")
     parser.add_argument(
         "--model-profile",
@@ -775,6 +814,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         num_workers=args.num_workers,
         checkpoint_every_steps=args.checkpoint_every_steps,
+        refinement_ratio=args.refinement_ratio,
     )
     train(
         args.dataset_dir,

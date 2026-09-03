@@ -25,10 +25,13 @@ profile reproduces the creator's architecture: 16 layers, 16 heads,
 `d_model=512`, and `d_ff=3072`. It uses independent checkpoints and is launched
 with `scripts/train_mini_arc_v12_full_oar.sh`.
 
-The full profile currently uses direct-output pre-training. Test-time training
+The completed `full` profile uses direct-output pre-training. Test-time training
 (TTT) is performed separately during ARC-AGI evaluation, on a temporary copy of
-the model for each puzzle. The model's optional `tgt_embedding` refinement path
-is not trained by this baseline and is therefore not used for its evaluation.
+the model for each puzzle. Its optional `tgt_embedding` path is untrained, so
+refinement must not be requested for that checkpoint. The independent
+`full-refinement` profile trains the same 67.3-million-parameter architecture
+from scratch with noisy partial targets on 25% of steps, matching the paper's
+refinement setup without overwriting the direct-only checkpoint.
 
 Training uses the reduced RE-ARC dataset. Examples are sampled uniformly by
 generator family, so large families do not dominate the objective. Validation
@@ -50,6 +53,9 @@ targets are held out per family and never appear as demonstrations.
   mirrors checkpoints back to `$HOME`.
 - `scripts/train_mini_arc_v12_full_oar.sh` selects the original full profile
   and `$HOME/arc-checkpoints/mini-arc-v12-full`.
+- `scripts/train_mini_arc_v12_full_refinement_oar.sh` trains 150,000 steps with
+  25% refinement in `$HOME/arc-checkpoints/mini-arc-v12-full-refinement` and
+  saves after every approximately two-minute epoch.
 - `scripts/train_mini_arc_v12_full_sirius_night_resume.sh` is the one-night,
   eight-A100 resume wrapper for the full checkpoint.
 
@@ -79,3 +85,23 @@ targets are held out per family and never appear as demonstrations.
 See [TRAINING_MINI_ARC_V12.md](TRAINING_MINI_ARC_V12.md) for exact transfer,
 smoke-test, OAR, checkpoint, and resume commands. See [AGENT.md](AGENT.md) for
 an implementation-oriented handoff.
+
+## Paper-aligned ARC evaluation
+
+The evaluator defaults to the paper's important TTT settings: all permutations
+of all combinations containing at least three demonstration pairs, up to 15
+epochs, and a 99.5% training-accuracy cutoff. The launcher evaluates the 114
+paper task IDs, uses the first four demonstrations and first test query as the
+original experiment artifacts did, and reports the paper's Score, Accuracy,
+and Closeness metrics. Accuracy includes centered 12×12 padding, so Score is the
+metric for completely solved puzzles.
+
+Run the direct-only checkpoint with TTT:
+
+```bash
+RESULTS_DIR="$HOME/arc-results/mini-arc-v12-full-paper-ttt" \
+./scripts/eval_mini_arc_v12_full_oar.sh
+```
+
+After the refinement profile has trained, evaluate it with two refinement
+rounds by also setting `CHECKPOINT_PATH` and `REFINEMENT_ROUNDS=2`.

@@ -169,3 +169,36 @@ The startup JSON prints `model_name`, the model architecture, and
 67.3 million parameters. Then benchmark one full epoch from a fresh full-model
 checkpoint directory, increasing `BATCH_SIZE` only after confirming the A100
 memory headroom.
+
+## 6. Paper-aligned TTT and refinement
+
+Evaluate the existing direct-only checkpoint using the 114 paper IDs, up to 15
+TTT epochs, and the 99.5% cutoff:
+
+```bash
+cd "$HOME/arc-agi/mini-arc"
+RESULTS_DIR="$HOME/arc-results/mini-arc-v12-full-paper-ttt" \
+./scripts/eval_mini_arc_v12_full_oar.sh
+```
+
+The paper metrics appear as `score`, `accuracy`, and `closeness`. Do not confuse
+`accuracy` with solved puzzles: it is cell accuracy over padded 12×12 outputs.
+
+To train the independent paper-style refinement variant from scratch on all
+visible GPUs:
+
+```bash
+cd "$HOME/arc-agi/mini-arc"
+./scripts/train_mini_arc_v12_full_refinement_oar.sh
+```
+
+It defaults to 150 epochs × 1,000 steps, global batch 128 on eight GPUs, and
+25% refinement steps. It checkpoints after every epoch under
+`$HOME/arc-checkpoints/mini-arc-v12-full-refinement` and resumes automatically.
+After training, evaluate TTT plus two refinement rounds:
+
+```bash
+CHECKPOINT_PATH="$HOME/arc-checkpoints/mini-arc-v12-full-refinement/best.pt" \
+RESULTS_DIR="$HOME/arc-results/mini-arc-v12-full-refinement-paper" \
+REFINEMENT_ROUNDS=2 ./scripts/eval_mini_arc_v12_full_oar.sh
+```

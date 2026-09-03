@@ -43,13 +43,11 @@ def _valid_grid(grid: Any, grid_dim: int) -> bool:
     )
 
 
-def _task_is_eligible(task: dict[str, Any], grid_dim: int, num_pairs: int) -> tuple[bool, str]:
+def _task_is_eligible(task: dict[str, Any], grid_dim: int) -> tuple[bool, str]:
     train = task.get("train")
     test = task.get("test")
     if not isinstance(train, list) or not isinstance(test, list) or not train or not test:
         return False, "missing train/test examples"
-    if len(train) > num_pairs:
-        return False, f"has {len(train)} demonstrations; model supports at most {num_pairs}"
     for example in [*train, *test]:
         if not isinstance(example, dict) or not _valid_grid(example.get("input"), grid_dim):
             return False, "invalid or oversized input grid"
@@ -88,10 +86,12 @@ def _ttt_examples(
     original mini-arc fine-tuning construction while retaining only real pairs.
     """
     examples = []
-    for ordering in itertools.permutations(train_examples):
-        held_out = ordering[-1]
-        grids, masks = _prompt(list(ordering[:-1]), held_out["input"], config)
-        examples.append((grids, masks, _target(held_out["output"], config)))
+    for length in range(3, len(train_examples) + 1):
+        for combination in itertools.combinations(train_examples, length):
+            for ordering in itertools.permutations(combination):
+                held_out = ordering[-1]
+                grids, masks = _prompt(list(ordering[:-1]), held_out["input"], config)
+                examples.append((grids, masks, _target(held_out["output"], config)))
     return examples
 
 
@@ -105,11 +105,12 @@ def _adapt_model(
     learning_rate: float,
     weight_decay: float,
     batch_size: int,
-) -> ARCVisionEncoder:
+    accuracy_cutoff: float,
+) -> tuple[ARCVisionEncoder, int, int]:
     model = copy.deepcopy(base_model).to(device)
     examples = _ttt_examples(train_examples, config)
     if not examples or epochs == 0:
-        return model.eval()
+        return model.eval(), 0, len(examples)
 
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     weights = torch.ones(model.num_classes, device=device)
@@ -117,9 +118,13 @@ def _adapt_model(
     criterion = nn.CrossEntropyLoss(weight=weights)
     scaler = GradScaler(device.type, enabled=device.type == "cuda")
     model.train()
+    epochs_run = 0
     for _ in range(epochs):
-        for start in range(0, len(examples), batch_size):
-            chunk = examples[start : start + batch_size]
+        correct = 0
+        cells = 0
+        order = torch.randperm(len(examples)).tolist()
+        for start in range(0, len(order), batch_size):
+            chunk = [examples[index] for index in order[start : start + batch_size]]
             grids = torch.stack([item[0] for item in chunk]).to(device, non_blocking=True)
             masks = torch.stack([item[1] for item in chunk]).to(device, non_blocking=True)
             targets = torch.stack([item[2] for item in chunk]).to(device, non_blocking=True).long()
@@ -130,12 +135,30 @@ def _adapt_model(
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-    return model.eval()
+            predictions = logits.argmax(dim=-1)
+            correct += (predictions == targets).sum().item()
+            cells += targets.numel()
+        epochs_run += 1
+        if correct / cells >= accuracy_cutoff:
+            break
+    return model.eval(), epochs_run, len(examples)
 
 
-def _predict(model: ARCVisionEncoder, grids: torch.Tensor, masks: torch.Tensor, device: torch.device) -> torch.Tensor:
+def _predict(
+    model: ARCVisionEncoder,
+    grids: torch.Tensor,
+    masks: torch.Tensor,
+    device: torch.device,
+    *,
+    target: torch.Tensor | None = None,
+) -> torch.Tensor:
     with torch.no_grad(), autocast(device_type=device.type, enabled=device.type == "cuda"):
-        return model.generate(grids.unsqueeze(0).to(device), masks.unsqueeze(0).to(device))[0][0].cpu()
+        target_batch = target.unsqueeze(0).to(device) if target is not None else None
+        return model.generate(
+            grids.unsqueeze(0).to(device),
+            masks.unsqueeze(0).to(device),
+            tgt=target_batch,
+        )[0][0].cpu()
 
 
 def _crop_prediction(prediction: torch.Tensor) -> list[list[int]]:
@@ -149,17 +172,61 @@ def _crop_prediction(prediction: torch.Tensor) -> list[list[int]]:
     return cropped.clamp_min(0).tolist()
 
 
-def _metrics(predictions: list[torch.Tensor], targets: list[torch.Tensor]) -> dict[str, float | int]:
+def _metrics(
+    predictions: list[torch.Tensor],
+    targets: list[torch.Tensor],
+    task_ids: list[str],
+) -> dict[str, float | int]:
     if not targets:
-        return {"queries_scored": 0, "cell_accuracy": 0.0, "exact_grid_accuracy": 0.0}
+        return {
+            "puzzles_scored": 0,
+            "queries_scored": 0,
+            "score": 0,
+            "score_percent": 0.0,
+            "accuracy": 0.0,
+            "closeness": 0,
+            "closeness_percent": 0.0,
+            "cell_accuracy": 0.0,
+            "exact_grid_accuracy": 0.0,
+        }
+    if not (len(predictions) == len(targets) == len(task_ids)):
+        raise ValueError("predictions, targets, and task IDs must have equal lengths")
     cells = sum(target.numel() for target in targets)
     correct = sum((prediction == target).sum().item() for prediction, target in zip(predictions, targets))
-    exact = sum(torch.equal(prediction, target) for prediction, target in zip(predictions, targets))
+    exact_queries = sum(torch.equal(prediction, target) for prediction, target in zip(predictions, targets))
+    task_cells: dict[str, int] = {}
+    task_correct: dict[str, int] = {}
+    task_exact: dict[str, bool] = {}
+    for task_id, prediction, target in zip(task_ids, predictions, targets):
+        task_cells[task_id] = task_cells.get(task_id, 0) + target.numel()
+        task_correct[task_id] = task_correct.get(task_id, 0) + (prediction == target).sum().item()
+        task_exact[task_id] = task_exact.get(task_id, True) and torch.equal(prediction, target)
+    puzzle_count = len(task_cells)
+    score = sum(task_exact.values())
+    closeness = sum(task_correct[task_id] / task_cells[task_id] >= 0.95 for task_id in task_cells)
     return {
+        "puzzles_scored": puzzle_count,
         "queries_scored": len(targets),
+        "score": score,
+        "score_percent": score / puzzle_count,
+        "accuracy": correct / cells,
+        "closeness": closeness,
+        "closeness_percent": closeness / puzzle_count,
         "cell_accuracy": correct / cells,
-        "exact_grid_accuracy": exact / len(targets),
+        "exact_grid_accuracy": exact_queries / len(targets),
     }
+
+
+def _load_task_ids(path: Path | None, challenges: dict[str, Any]) -> list[str]:
+    if path is None:
+        return list(challenges)
+    task_ids = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(task_ids) != len(set(task_ids)):
+        raise ValueError(f"duplicate task ID in {path}")
+    missing = [task_id for task_id in task_ids if task_id not in challenges]
+    if missing:
+        raise ValueError(f"{len(missing)} requested task IDs are absent from challenges: {missing[:5]}")
+    return task_ids
 
 
 def _atomic_json_dump(value: dict[str, Any], path: Path) -> None:
@@ -183,6 +250,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     if checkpoint.get("model_type") != "vision_encoder":
         raise ValueError("checkpoint is not a vision_encoder checkpoint")
+    trained_refinement_ratio = checkpoint.get("train_config", {}).get("refinement_ratio", 0.0)
+    if args.refinement_rounds > 0 and trained_refinement_ratio <= 0.0:
+        raise ValueError(
+            "refinement was requested, but this checkpoint never trained its refinement branch"
+        )
     params = ARCTransformerEncoderDecoderParams(**checkpoint["model_params"])
     model = ARCVisionEncoder(params).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -190,17 +262,24 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     config = ARCDatasetParams(max_grid_size=params.grid_dim, max_train_grids=params.num_train_pairs, color_offset=1)
     challenges = _load_json(args.challenges)
     solutions = _load_json(args.solutions) if args.solutions else {}
+    requested_task_ids = _load_task_ids(args.task_ids_file, challenges)
+    torch.manual_seed(args.seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed(args.seed)
 
     direct_predictions: list[torch.Tensor] = []
     tuned_predictions: list[torch.Tensor] = []
+    refined_predictions: list[torch.Tensor] = []
     targets: list[torch.Tensor] = []
+    scored_task_ids: list[str] = []
     results: dict[str, Any] = {}
     skipped: dict[str, str] = {}
     eligible = 0
-    for task_index, (task_id, task) in enumerate(challenges.items()):
+    for task_index, task_id in enumerate(requested_task_ids):
         if args.max_tasks is not None and task_index >= args.max_tasks:
             break
-        eligible_task, reason = _task_is_eligible(task, params.grid_dim, params.num_train_pairs)
+        task = challenges[task_id]
+        eligible_task, reason = _task_is_eligible(task, params.grid_dim)
         task_solutions = solutions.get(task_id, [])
         if eligible_task and task_solutions:
             if len(task_solutions) != len(task["test"]):
@@ -213,8 +292,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             skipped[task_id] = reason
             continue
         eligible += 1
-        train_examples = task["train"]
-        tuned_model = (
+        all_train_examples = task["train"]
+        train_examples = all_train_examples[: params.num_train_pairs]
+        tuned_model, ttt_epochs_run, ttt_examples = (
             _adapt_model(
                 model,
                 train_examples,
@@ -224,27 +304,42 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 learning_rate=args.ttt_learning_rate,
                 weight_decay=args.ttt_weight_decay,
                 batch_size=args.ttt_batch_size,
+                accuracy_cutoff=args.ttt_accuracy_cutoff,
             )
             if args.ttt_epochs > 0
-            else model
+            else (model, 0, 0)
         )
         task_results = []
-        for query_index, query in enumerate(task["test"]):
+        task_queries = task["test"][:1] if args.first_query_only else task["test"]
+        for query_index, query in enumerate(task_queries):
             grids, masks = _prompt(train_examples, query["input"], config)
             direct = _predict(model, grids, masks, device)
             tuned = _predict(tuned_model, grids, masks, device)
+            refined = tuned
+            for _ in range(args.refinement_rounds):
+                refined = _predict(tuned_model, grids, masks, device, target=refined)
             record: dict[str, Any] = {
                 "direct_prediction": _crop_prediction(direct),
                 "ttt_prediction": _crop_prediction(tuned),
+                "demonstrations_available": len(all_train_examples),
+                "demonstrations_used": len(train_examples),
+                "ttt_examples": ttt_examples,
+                "ttt_epochs_run": ttt_epochs_run,
             }
+            if args.refinement_rounds > 0:
+                record["refined_prediction"] = _crop_prediction(refined)
             if query_index < len(task_solutions):
                 target = _target(task_solutions[query_index], config)
                 direct_predictions.append(direct)
                 tuned_predictions.append(tuned)
+                refined_predictions.append(refined)
                 targets.append(target)
+                scored_task_ids.append(task_id)
                 record["target"] = task_solutions[query_index]
                 record["direct_exact"] = bool(torch.equal(direct, target))
                 record["ttt_exact"] = bool(torch.equal(tuned, target))
+                if args.refinement_rounds > 0:
+                    record["refined_exact"] = bool(torch.equal(refined, target))
             task_results.append(record)
         results[task_id] = task_results
         del tuned_model
@@ -260,14 +355,23 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "learning_rate": args.ttt_learning_rate,
             "weight_decay": args.ttt_weight_decay,
             "batch_size": args.ttt_batch_size,
+            "accuracy_cutoff": args.ttt_accuracy_cutoff,
         },
-        "tasks_requested": len(challenges) if args.max_tasks is None else min(args.max_tasks, len(challenges)),
+        "refinement_rounds": args.refinement_rounds,
+        "first_query_only": args.first_query_only,
+        "tasks_requested": (
+            len(requested_task_ids)
+            if args.max_tasks is None
+            else min(args.max_tasks, len(requested_task_ids))
+        ),
         "tasks_eligible": eligible,
         "tasks_skipped": skipped,
-        "direct_metrics": _metrics(direct_predictions, targets),
-        "ttt_metrics": _metrics(tuned_predictions, targets),
+        "direct_metrics": _metrics(direct_predictions, targets, scored_task_ids),
+        "ttt_metrics": _metrics(tuned_predictions, targets, scored_task_ids),
         "predictions": results,
     }
+    if args.refinement_rounds > 0:
+        report["refined_metrics"] = _metrics(refined_predictions, targets, scored_task_ids)
     _atomic_json_dump(report, Path(args.output))
     return report
 
@@ -278,21 +382,35 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--challenges", required=True, type=Path)
     parser.add_argument("--solutions", type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--ttt-epochs", type=int, default=2)
+    parser.add_argument("--ttt-epochs", type=int, default=15)
     parser.add_argument("--ttt-learning-rate", type=float, default=1e-5)
     parser.add_argument("--ttt-weight-decay", type=float, default=1e-5)
     parser.add_argument("--ttt-batch-size", type=int, default=4)
+    parser.add_argument("--ttt-accuracy-cutoff", type=float, default=0.995)
+    parser.add_argument("--refinement-rounds", type=int, default=0)
+    parser.add_argument("--task-ids-file", type=Path)
+    parser.add_argument(
+        "--first-query-only",
+        action="store_true",
+        help="score one query per puzzle, matching the original paper's evaluation artifacts",
+    )
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-tasks", type=int)
     parser.add_argument("--device")
     args = parser.parse_args()
-    if args.ttt_epochs < 0 or args.ttt_batch_size < 1:
+    if args.ttt_epochs < 0 or args.refinement_rounds < 0 or args.ttt_batch_size < 1:
         parser.error("TTT epochs must be non-negative and batch size must be positive")
+    if not 0.0 < args.ttt_accuracy_cutoff <= 1.0:
+        parser.error("TTT accuracy cutoff must be in (0, 1]")
     return args
 
 
 def main() -> int:
     report = evaluate(_parse_args())
-    print(json.dumps({key: report[key] for key in ("tasks_eligible", "tasks_skipped", "direct_metrics", "ttt_metrics")}, indent=2, sort_keys=True))
+    summary_keys = ["tasks_eligible", "tasks_skipped", "direct_metrics", "ttt_metrics"]
+    if "refined_metrics" in report:
+        summary_keys.append("refined_metrics")
+    print(json.dumps({key: report[key] for key in summary_keys}, indent=2, sort_keys=True))
     return 0
 
 

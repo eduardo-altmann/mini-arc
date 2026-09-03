@@ -14,6 +14,7 @@ CHECKPOINT_PATH="${CHECKPOINT_PATH:-$HOME/arc-checkpoints/mini-arc-v12-full/best
 RESULTS_DIR="${RESULTS_DIR:-$HOME/arc-results/mini-arc-v12-full}"
 CHALLENGES_PATH="${CHALLENGES_PATH:-$MINI_ARC_SOURCE/data/arc-agi_evaluation_challenges.json}"
 SOLUTIONS_PATH="${SOLUTIONS_PATH:-$MINI_ARC_SOURCE/data/arc-agi_evaluation_solutions.json}"
+TASK_IDS_PATH="${TASK_IDS_PATH:-$MINI_ARC_SOURCE/data/mini_arc_v12_evaluation_ids.txt}"
 JOB_ID="${OAR_JOB_ID:-manual-$$}"
 JOB_ROOT="/tmp/$USER/mini-arc-v12-eval-$JOB_ID"
 LOCAL_IMAGE="$JOB_ROOT/mini-arc-v12.sif"
@@ -25,7 +26,7 @@ case "$JOB_ROOT" in
     *) echo "Refusing unsafe job directory: $JOB_ROOT" >&2; exit 2 ;;
 esac
 
-for path in "$MINI_ARC_SOURCE/arc_prize/eval_arc_agi.py" "$APPTAINER_IMAGE" "$CHECKPOINT_PATH" "$CHALLENGES_PATH" "$SOLUTIONS_PATH"; do
+for path in "$MINI_ARC_SOURCE/arc_prize/eval_arc_agi.py" "$APPTAINER_IMAGE" "$CHECKPOINT_PATH" "$CHALLENGES_PATH" "$SOLUTIONS_PATH" "$TASK_IDS_PATH"; do
     if [[ ! -f "$path" ]]; then
         echo "Required file not found: $path" >&2
         exit 2
@@ -47,6 +48,7 @@ rsync -a "$APPTAINER_IMAGE" "$LOCAL_IMAGE"
 rsync -a "$CHECKPOINT_PATH" "$LOCAL_CHECKPOINT"
 rsync -a "$CHALLENGES_PATH" "$JOB_ROOT/data/challenges.json"
 rsync -a "$SOLUTIONS_PATH" "$JOB_ROOT/data/solutions.json"
+rsync -a "$TASK_IDS_PATH" "$JOB_ROOT/data/task_ids.txt"
 
 CONTAINER=(
     apptainer exec --nv
@@ -72,11 +74,15 @@ EVAL_ARGS=(
     --checkpoint "$LOCAL_CHECKPOINT"
     --challenges "$JOB_ROOT/data/challenges.json"
     --solutions "$JOB_ROOT/data/solutions.json"
+    --task-ids-file "$JOB_ROOT/data/task_ids.txt"
+    --first-query-only
     --output "$LOCAL_RESULTS/arc-agi-evaluation.json"
-    --ttt-epochs "${TTT_EPOCHS:-2}"
+    --ttt-epochs "${TTT_EPOCHS:-15}"
     --ttt-learning-rate "${TTT_LEARNING_RATE:-0.00001}"
     --ttt-weight-decay "${TTT_WEIGHT_DECAY:-0.00001}"
     --ttt-batch-size "${TTT_BATCH_SIZE:-4}"
+    --ttt-accuracy-cutoff "${TTT_ACCURACY_CUTOFF:-0.995}"
+    --refinement-rounds "${REFINEMENT_ROUNDS:-0}"
 )
 if [[ -n "${MAX_TASKS:-}" ]]; then
     EVAL_ARGS+=(--max-tasks "$MAX_TASKS")
