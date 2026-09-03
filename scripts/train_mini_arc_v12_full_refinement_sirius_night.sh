@@ -4,7 +4,7 @@
 #OAR -t exotic
 #OAR -t night
 #OAR -p host='sirius-1.lyon.grid5000.fr'
-#OAR -l host=1/gpu=8
+#OAR -l host=1/gpu=8,walltime=8:55:00
 #OAR -O mini-arc-v12-full-refinement-%jobid%.out
 #OAR -E mini-arc-v12-full-refinement-%jobid%.err
 
