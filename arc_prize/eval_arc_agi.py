@@ -201,6 +201,14 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         if args.max_tasks is not None and task_index >= args.max_tasks:
             break
         eligible_task, reason = _task_is_eligible(task, params.grid_dim, params.num_train_pairs)
+        task_solutions = solutions.get(task_id, [])
+        if eligible_task and task_solutions:
+            if len(task_solutions) != len(task["test"]):
+                eligible_task = False
+                reason = "solution count does not match test query count"
+            elif any(not _valid_grid(solution, params.grid_dim) for solution in task_solutions):
+                eligible_task = False
+                reason = "invalid or oversized known solution grid"
         if not eligible_task:
             skipped[task_id] = reason
             continue
@@ -221,7 +229,6 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             else model
         )
         task_results = []
-        task_solutions = solutions.get(task_id, [])
         for query_index, query in enumerate(task["test"]):
             grids, masks = _prompt(train_examples, query["input"], config)
             direct = _predict(model, grids, masks, device)
