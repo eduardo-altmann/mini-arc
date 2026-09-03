@@ -62,6 +62,31 @@ Select a profile with `--model-profile`; use the full wrapper
 `$HOME/arc-checkpoints/mini-arc-v12-full`, and must never be pointed at the
 reduced baseline checkpoint directory.
 
+### Current full-model run
+
+The full profile was trained on 8 A100s through epoch 42. Its latest observed
+held-out RE-ARC metrics were 94.49% validation cell accuracy and 26.63% exact
+grid accuracy. `latest.pt` is the resumable state; `best.pt` remains the state
+with the lowest validation loss and is the checkpoint to evaluate first.
+
+The epoch-42 stop was early stopping, not a training failure. The
+`train_mini_arc_v12_full_sirius_night_resume.sh` wrapper raises patience to 100
+and resumes the same run through epoch 100 without `--force-restart`.
+
+### ARC-AGI evaluation and TTT
+
+`arc_prize/eval_arc_agi.py` is the evaluator for the new checkpoint format; the
+older Modal evaluator expects a different checkpoint schema and must not be
+used directly. It performs direct inference and optional test-time training
+(TTT): for each ARC task it copies the base model, adapts the copy using that
+task's demonstrations, predicts its query, and discards the copy. TTT does not
+change the base checkpoint or model architecture.
+
+The current baseline never passes a noisy target through `tgt_embedding` during
+pre-training. Consequently its target-refinement branch is untrained; do not
+run a second `tgt=` refinement pass on this checkpoint. A faithful refinement
+variant requires a new training profile and new checkpoints.
+
 Do not replace the full checkpoint with model weights alone. A resumable
 checkpoint includes model, optimizer, AMP scaler, schedulers, epoch/step,
 history, best metric, dataset fingerprint, and per-rank RNG state.

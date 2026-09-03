@@ -25,6 +25,11 @@ profile reproduces the creator's architecture: 16 layers, 16 heads,
 `d_model=512`, and `d_ff=3072`. It uses independent checkpoints and is launched
 with `scripts/train_mini_arc_v12_full_oar.sh`.
 
+The full profile currently uses direct-output pre-training. Test-time training
+(TTT) is performed separately during ARC-AGI evaluation, on a temporary copy of
+the model for each puzzle. The model's optional `tgt_embedding` refinement path
+is not trained by this baseline and is therefore not used for its evaluation.
+
 Training uses the reduced RE-ARC dataset. Examples are sampled uniformly by
 generator family, so large families do not dominate the objective. Validation
 targets are held out per family and never appear as demonstrations.
@@ -37,11 +42,16 @@ targets are held out per family and never appear as demonstrations.
   validation tasks.
 - `arc_prize/train_rearc.py` implements DDP training, metrics, checkpointing,
   signal handling, and resume.
+- `arc_prize/eval_arc_agi.py` evaluates a checkpoint on ARC-AGI JSON tasks,
+  reports direct and TTT metrics when solutions are available, and writes ARC
+  predictions for tasks without solutions.
 - `containers/mini-arc-v12.def` defines the PyTorch/Apptainer image.
 - `scripts/train_mini_arc_v12_oar.sh` stages a Grid'5000 job into `/tmp` and
   mirrors checkpoints back to `$HOME`.
 - `scripts/train_mini_arc_v12_full_oar.sh` selects the original full profile
   and `$HOME/arc-checkpoints/mini-arc-v12-full`.
+- `scripts/train_mini_arc_v12_full_sirius_night_resume.sh` is the one-night,
+  eight-A100 resume wrapper for the full checkpoint.
 
 ## Quick workflow
 
